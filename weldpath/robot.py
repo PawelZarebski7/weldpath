@@ -118,3 +118,26 @@ def inverse_kinematics(p: OPWParams, T: np.ndarray) -> np.ndarray:
 
     q = np.array(solutions)
     return (q + np.pi) % (2 * np.pi) - np.pi  # zawijamy do (-pi, pi]
+
+
+def joint_positions(p: OPWParams, q: np.ndarray) -> np.ndarray:
+    """Punkty charakterystyczne robota w układzie podstawy (do modelu kolizji).
+
+    Wiersze: [podstawa, oś 2 (bark), oś 3 (łokieć), środek nadgarstka, kołnierz].
+    """
+    q1, q2, q3 = q[0], q[1], q[2]
+    psi3 = np.arctan2(p.a2, p.c3)
+    k = np.hypot(p.a2, p.c3)
+
+    def to_base(x: float, z: float) -> np.ndarray:
+        # Punkt z płaszczyzny ramienia (x, b, z) obrócony osią 1.
+        return np.array([x * np.cos(q1) - p.b * np.sin(q1),
+                         x * np.sin(q1) + p.b * np.cos(q1),
+                         z])
+
+    shoulder = to_base(p.a1, p.c1)
+    elbow = to_base(p.a1 + p.c2 * np.sin(q2), p.c1 + p.c2 * np.cos(q2))
+    wrist = to_base(p.a1 + p.c2 * np.sin(q2) + k * np.sin(q2 + q3 + psi3),
+                    p.c1 + p.c2 * np.cos(q2) + k * np.cos(q2 + q3 + psi3))
+    flange = forward_kinematics(p, q)[:3, 3]
+    return np.array([np.zeros(3), shoulder, elbow, wrist, flange])
