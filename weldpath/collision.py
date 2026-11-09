@@ -1,7 +1,8 @@
 """Krok 5a: model kolizyjny robota i otoczenia (FCL).
 
 Robot  -> kilka KAPSUŁ (walec z półkulami na końcach) rozpiętych między punktami
-          charakterystycznymi z robot.joint_positions + kapsuła palnika.
+          charakterystycznymi z robot.joint_positions + palnik z dwóch kapsuł
+          (gruby korpus i wąska dysza – jeden gruby walec nie wejdzie w ciasny narożnik).
           Kapsuła to najszybsza bryła do testów kolizji: odległość od kapsuły
           to odległość od odcinka minus promień.
 Detal  -> siatka trójkątów z modelu STEP (BRepMesh) w drzewie BVH.
@@ -77,8 +78,10 @@ class RobotGeometry:
     upper_arm: float = 110.0
     forearm: float = 90.0
     wrist: float = 70.0
-    torch: float = 25.0
-    torch_clearance: float = 15.0  # kapsuła palnika kończy się 15 mm przed TCP (wolny wylot drutu)
+    torch: float = 25.0            # korpus palnika i szyjka
+    nozzle: float = 10.0           # dysza gazowa (Ø 20 mm)
+    nozzle_length: float = 70.0    # długość dyszy liczona od TCP
+    torch_clearance: float = 15.0  # dysza kończy się 15 mm przed TCP (wolny wylot drutu)
 
 
 DEFAULT_GEOMETRY = RobotGeometry()
@@ -110,16 +113,24 @@ class FCLChecker:
             self.obstacles.append(fcl.CollisionObject(table, _transform(T)))
 
         g = geometry
-        self._radii = [g.upper_arm, g.forearm, g.wrist, g.torch]
+        self._radii = [g.upper_arm, g.forearm, g.wrist, g.torch, g.nozzle]
         self._links: list[fcl.CollisionObject] = []
 
     def link_segments(self, q: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
-        """Odcinki osi kapsuł: ramię, przedramię, nadgarstek, palnik."""
+        """Odcinki osi kapsuł: ramię, przedramię, nadgarstek, korpus palnika, dysza.
+
+        Kapsuła sięga o promień poza swój odcinek, więc odcinki skracamy o promień,
+        żeby kapsuła kończyła się dokładnie tam, gdzie chcemy.
+        """
+        g = self.geometry
         _, shoulder, elbow, wrist, flange = joint_positions(self.robot, q)
         T_tcp = forward_kinematics(self.robot, q) @ self.torch.flange_to_tcp()
-        tcp, torch_axis = T_tcp[:3, 3], T_tcp[:3, 2]
-        torch_end = tcp - (self.geometry.torch_clearance + self.geometry.torch) * torch_axis
-        return [(shoulder, elbow), (elbow, wrist), (wrist, flange), (flange, torch_end)]
+        tcp, axis = T_tcp[:3, 3], T_tcp[:3, 2]
+        nozzle_tip = tcp - (g.torch_clearance + g.nozzle) * axis
+        nozzle_back = tcp - g.nozzle_length * axis
+        body_end = tcp - (g.nozzle_length + g.torch) * axis
+        return [(shoulder, elbow), (elbow, wrist), (wrist, flange),
+                (flange, body_end), (nozzle_back, nozzle_tip)]
 
     def _update_links(self, q: np.ndarray) -> None:
         # FCL w Pythonie nie pozwala podmienić geometrii obiektu, a długość kapsuły
