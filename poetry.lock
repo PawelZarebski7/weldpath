@@ -867,6 +867,22 @@ numpy = [
 ]
 
 [[package]]
+name = "robodk"
+version = "6.0.2"
+description = "RoboDK tools for simulating and programming industrial robots (implements the RoboDK API)"
+optional = false
+python-versions = ">=3.5"
+groups = ["main"]
+files = [
+    {file = "robodk-6.0.2-py3-none-any.whl", hash = "sha256:9ab243413fbc633e90916c3aa24f861c16e209e663686cfb22f06391e792b503"},
+]
+
+[package.extras]
+apps = ["PySide2 (==5.15.*)"]
+cv = ["numpy", "opencv-contrib-python"]
+lint = ["astroid"]
+
+[[package]]
 name = "ruff"
 version = "0.17.4"
 description = "An extremely fast Python linter and code formatter, written in Rust."
@@ -958,4 +974,4 @@ web = ["wslink (>=1.0.4)"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "7500aa8ee51b8f009f4a98752a7055978a81e5afdb4fdd780d77a45f4c8983a0"
+content-hash = "9fa59b6a136b03b616844e1e1a356a054a669427873c842885562b1370f63ebe"
