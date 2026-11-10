@@ -24,7 +24,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from weldpath.orientation import homogeneous, rotation_about_axis, torch_path
-from weldpath.robot import OPWParams, inverse_kinematics
+from weldpath.robot import (
+    ABB_IRB2400_CONVENTION,
+    JointConvention,
+    OPWParams,
+    inverse_kinematics,
+)
 from weldpath.seams import Seam
 
 if TYPE_CHECKING:  # tylko dla podpowiedzi typów – unikamy importu cyklicznego
@@ -54,13 +59,40 @@ class JointLimits:
         return bool(np.all(q >= self.lower) and np.all(q <= self.upper))
 
 
-# Limity ABB IRB 2400 z karty katalogowej, przeliczone na konwencję OPW.
-# U ABB zero osi 3 to przedramię POZIOMO, w OPW – pionowo w górę, więc
-# q3_OPW = q3_ABB + 90°  (zakres ABB −60°…+65°  ->  OPW 30°…155°).
-# Osie 4 i 6 mają u ABB ±200° i ±400°, ale nasze IK zawija kąty do ±180°.
-IRB2400_LIMITS = JointLimits(
-    lower=np.radians([-180, -100, 30, -180, -120, -180]),
-    upper=np.radians([180, 110, 155, 180, 120, 180]),
+@dataclass(frozen=True)
+class ControllerLimits:
+    """Limity osi zapisane w kątach STEROWNIKA (jak w karcie katalogowej).
+
+    Sprawdzamy je po przeliczeniu kątów OPW na kąty sterownika – dzięki temu
+    sprzężenie osi 2-3 w robocie z równoległowodem jest uwzględnione automatycznie.
+    `lower`/`upper` (w radianach OPW) to tylko prostokąt do losowania w planerze RRT;
+    o dopuszczalności zawsze rozstrzyga ok().
+    """
+    convention: JointConvention
+    lower_deg: tuple[float, ...]
+    upper_deg: tuple[float, ...]
+
+    def ok(self, q: np.ndarray) -> bool:
+        q_robot = np.array(self.convention.to_robot(q))
+        return bool(np.all(q_robot >= self.lower_deg) and np.all(q_robot <= self.upper_deg))
+
+    @property
+    def lower(self) -> np.ndarray:
+        return np.radians([-180.0, *self.lower_deg[1:2], -180.0, *self.lower_deg[3:]])
+
+    @property
+    def upper(self) -> np.ndarray:
+        return np.radians([180.0, *self.upper_deg[1:2], 180.0, *self.upper_deg[3:]])
+
+
+# Limity ABB IRB 2400 z karty katalogowej (kąty sterownika ABB).
+# Oś 3 u ABB jest liczona względem poziomu (równoległowód) – patrz JointConvention.
+# Osie 4 i 6 mają u ABB ±200° i ±400°, ale nasze IK zawija kąty do ±180°,
+# więc w praktyce i tak pracujemy w ±180°.
+IRB2400_LIMITS = ControllerLimits(
+    convention=ABB_IRB2400_CONVENTION,
+    lower_deg=(-180.0, -100.0, -60.0, -200.0, -120.0, -400.0),
+    upper_deg=(180.0, 110.0, 65.0, 200.0, 120.0, 400.0),
 )
 
 
@@ -113,7 +145,8 @@ def flange_targets(seam: Seam, T_base_part: np.ndarray, torch: Torch, spin: floa
 
 
 def solve_seam(robot: OPWParams, seam: Seam, T_base_part: np.ndarray,
-               torch: Torch = DEFAULT_TORCH, limits: JointLimits = IRB2400_LIMITS,
+               torch: Torch = DEFAULT_TORCH,
+               limits: "JointLimits | ControllerLimits" = IRB2400_LIMITS,
                spin: float = 0.0, step: float = 10.0, work_angle: float | None = None,
                travel_angle: float = 10.0, singular_q5: float = 10.0,
                max_step: float = 15.0,

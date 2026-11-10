@@ -15,36 +15,15 @@ a OPW – względem ramienia. Obrót osi 2 w sterowniku nie zmienia nachylenia
 przedramienia, stąd sprzężenie −1. Do tego zero osi 3 w ABB to przedramię
 poziomo, a w OPW pionowo – przesunięcie +90°.
 """
-from dataclasses import dataclass
 from itertools import pairwise
 
 import numpy as np
 from robodk import robolink, robomath
 
+# Konwencja osi to czysta kinematyka – mieszka w robot.py, tu ją tylko udostępniamy.
+from weldpath.robot import ABB_IRB2400_CONVENTION, JointConvention
 
-@dataclass(frozen=True)
-class JointConvention:
-    signs: tuple[int, ...] = (1, 1, 1, 1, 1, 1)
-    offsets_deg: tuple[float, ...] = (0.0, 0.0, 90.0, 0.0, 0.0, 0.0)
-    j23_coupling: float = 0.0   # q3_OPW += j23_coupling · q2_robot
-
-    def to_robot(self, q_opw: np.ndarray) -> list[float]:
-        """Kąty OPW [rad] -> kąty sterownika [°]."""
-        deg = np.degrees(np.asarray(q_opw, float))
-        q = [(d - o) * s for d, o, s in zip(deg, self.offsets_deg, self.signs)]
-        # Oś 3: zdejmujemy sprzężenie z osią 2 (q[1] to już kąt sterownika osi 2).
-        q[2] = (deg[2] - self.offsets_deg[2] - self.j23_coupling * q[1]) * self.signs[2]
-        return [float(v) for v in q]
-
-    def to_opw(self, q_robot_deg) -> np.ndarray:
-        """Kąty sterownika [°] -> kąty OPW [rad]."""
-        q = np.asarray(list(q_robot_deg)[:6], float)
-        deg = q * np.array(self.signs) + np.array(self.offsets_deg)
-        deg[2] += self.j23_coupling * q[1]
-        return np.radians(deg)
-
-
-ABB_IRB2400_CONVENTION = JointConvention(j23_coupling=-1.0)
+__all__ = ["ABB_IRB2400_CONVENTION", "JointConvention", "RoboDKCell", "RoboDKChecker"]
 
 
 def to_mat(T: np.ndarray) -> robomath.Mat:

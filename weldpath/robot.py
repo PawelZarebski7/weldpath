@@ -141,3 +141,40 @@ def joint_positions(p: OPWParams, q: np.ndarray) -> np.ndarray:
                     p.c1 + p.c2 * np.cos(q2) + k * np.cos(q2 + q3 + psi3))
     flange = forward_kinematics(p, q)[:3, 3]
     return np.array([np.zeros(3), shoulder, elbow, wrist, flange])
+
+
+# --- konwencja osi sterownika ---------------------------------------------
+#
+# Sterownik (i RoboDK) może inaczej definiować zero i kierunek osi niż OPW:
+#
+#     q_OPW [°] = znak · q_robot [°] + przesunięcie          (osie 1, 2, 4, 5, 6)
+#     q3_OPW    = znak · q3_robot + przesunięcie + sprzężenie · q2_robot
+#
+# ABB IRB 2400 ma RÓWNOLEGŁOWÓD: silnik osi 3 napędza przedramię przez dźwignię,
+# więc sterownik mierzy kąt osi 3 względem POZIOMU, a OPW – względem ramienia
+# (sprzężenie −1). Zero osi 3 w ABB to przedramię poziomo, w OPW pionowo (+90°).
+# Zweryfikowane z kinematyką RoboDK: 0.000 mm na 200 losowych ułożeniach.
+
+@dataclass(frozen=True)
+class JointConvention:
+    signs: tuple[int, ...] = (1, 1, 1, 1, 1, 1)
+    offsets_deg: tuple[float, ...] = (0.0, 0.0, 90.0, 0.0, 0.0, 0.0)
+    j23_coupling: float = 0.0   # q3_OPW += j23_coupling · q2_robot
+
+    def to_robot(self, q_opw: np.ndarray) -> list[float]:
+        """Kąty OPW [rad] -> kąty sterownika [°]."""
+        deg = np.degrees(np.asarray(q_opw, float))
+        q = [(d - o) * s for d, o, s in zip(deg, self.offsets_deg, self.signs)]
+        # Oś 3: zdejmujemy sprzężenie z osią 2 (q[1] to już kąt sterownika osi 2).
+        q[2] = (deg[2] - self.offsets_deg[2] - self.j23_coupling * q[1]) * self.signs[2]
+        return [float(v) for v in q]
+
+    def to_opw(self, q_robot_deg) -> np.ndarray:
+        """Kąty sterownika [°] -> kąty OPW [rad]."""
+        q = np.asarray(list(q_robot_deg)[:6], float)
+        deg = q * np.array(self.signs) + np.array(self.offsets_deg)
+        deg[2] += self.j23_coupling * q[1]
+        return np.radians(deg)
+
+
+ABB_IRB2400_CONVENTION = JointConvention(j23_coupling=-1.0)

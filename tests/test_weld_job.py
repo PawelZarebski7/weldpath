@@ -91,10 +91,11 @@ def test_singularity_warning_is_reported(seams):
     assert plan.feasible  # ostrzeżenie nie blokuje planu
 
 
-def test_spin_search_improves_wrist_clearance(seams):
-    # Detal nisko i blisko: obrót palnika powinien odsunąć nadgarstek od q5 = 0.
-    low = homogeneous(np.eye(3), np.array([600.0, -100.0, -200.0]))
-    fixed = solve_seam(ABB_IRB2400, seams[0], low, spin=0.0)
-    best = plan_seam(ABB_IRB2400, seams[0], low)
-    assert best.min_wrist_q5 > fixed.min_wrist_q5
+def test_spin_search_rescues_seam_at_edge_of_reach(seams):
+    # Detal 1.4 m od robota: bez obrotu palnika poza zasięgiem (limity osi),
+    # obrót wokół osi palnika przesuwa kołnierz bliżej i spoina staje się osiągalna.
+    far = homogeneous(np.eye(3), np.array([1400.0, -100.0, 200.0]))
+    assert solve_seam(ABB_IRB2400, seams[0], far, spin=0.0) is None
+    best = plan_seam(ABB_IRB2400, seams[0], far)
+    assert best is not None and best.feasible
     assert best.spin != 0.0

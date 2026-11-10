@@ -9,7 +9,7 @@ import pytest
 from weldpath.assembly import find_weld_seams, fuse_bodies, solids
 from weldpath.cad import load_step
 from weldpath.collision import FCLChecker
-from weldpath.orientation import homogeneous
+from weldpath.orientation import homogeneous, torch_frame
 from weldpath.robot import ABB_IRB2400
 from weldpath.weld_job import plan_weld, reversed_seam, split_center_out, trimmed_seam
 
@@ -99,13 +99,17 @@ def test_open_outer_seam_uses_standard_settings(weld_seams, checker):
     assert p.trim == (0.0, 0.0)
 
 
-def test_vertical_corner_seam_is_welded_from_above(weld_seams, checker):
-    seam = find(weld_seams, (1, 3), [145, 50, 10])
-    plans = plan_weld(ABB_IRB2400, seam, T_BASE_PART, checker)
-    assert len(plans) == 1
-    p = plans[0]
-    assert p.feasible
-    assert p.seam.start[2] > p.seam.end[2]  # spawanie z góry na dół
+def test_vertical_corner_seam_torch_comes_from_above(weld_seams, checker):
+    # W kieszeni poziomy palnik uderzy w przeciwległe żebro, więc musi wchodzić
+    # z góry: oś palnika (Z, od palnika do materiału) skierowana w dół.
+    # Kierunek spawania (z góry na dół lub z dołu do góry) zależy od limitów osi.
+    for start in ([145, 50, 10], [155, 50, 10]):
+        seam = find(weld_seams, (1, 3), start)
+        plans = plan_weld(ABB_IRB2400, seam, T_BASE_PART, checker)
+        assert len(plans) == 1 and plans[0].feasible
+        p = plans[0]
+        torch_axis = torch_frame(p.seam, p.seam.start, p.work_angle, p.travel_angle)[:3, 2]
+        assert torch_axis[2] < -0.5
 
 
 def test_closed_pocket_seam_is_split_center_out(weld_seams, checker):
