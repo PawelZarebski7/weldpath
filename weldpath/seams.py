@@ -15,11 +15,13 @@ from dataclasses import dataclass
 import numpy as np
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve
-from OCP.BRepGProp import BRepGProp_Face
+from OCP.BRepGProp import BRepGProp, BRepGProp_Face
 from OCP.collections import (
     IndexedDataMap_TopoDS_Shape_List_TopoDS_Shape_TopTools_ShapeMapHasher as EdgeFaceMap,
 )
+from OCP.GeomAbs import GeomAbs_Line
 from OCP.gp import gp_Pnt, gp_Vec
+from OCP.GProp import GProp_GProps
 from OCP.ShapeAnalysis import ShapeAnalysis_Surface
 from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
 from OCP.TopExp import TopExp, TopExp_Explorer
@@ -33,12 +35,22 @@ class Seam:
     start: np.ndarray        # punkt początkowy [mm]
     end: np.ndarray          # punkt końcowy [mm]
     tangent: np.ndarray      # kierunek spoiny (jednostkowy)
-    normals: tuple[np.ndarray, np.ndarray]  # normalne zewnętrzne obu ścian
+    normals: tuple[np.ndarray, np.ndarray]  # normalne zewnętrzne obu ścian (w midpoint)
     opening_angle: float     # kąt otwarcia doliny [°]
+    arc_length: float | None = None        # długość krzywej (tylko spoiny krzywoliniowe)
+    midpoint: np.ndarray | None = None     # punkt w połowie krzywej (tam liczone normalne)
 
     @property
     def length(self) -> float:
+        # Dla prostej: odległość końców. Dla okręgu początek = koniec, więc liczy
+        # się długość łuku zapisana przy wykrywaniu.
+        if self.arc_length is not None:
+            return self.arc_length
         return float(np.linalg.norm(self.end - self.start))
+
+    @property
+    def is_straight(self) -> bool:
+        return self.arc_length is None
 
 
 def _np(v) -> np.ndarray:
@@ -119,6 +131,11 @@ def find_seams(shape: TopoDS_Shape, min_angle: float = 30.0,
         if not (min_angle <= angle <= max_angle):
             continue
 
+        arc = None
+        if curve.GetType() != GeomAbs_Line:
+            props = GProp_GProps()
+            BRepGProp.LinearProperties_s(edge, props)
+            arc = props.Mass()
         seams.append(Seam(
             edge=edge,
             faces=(f1, f2),
@@ -127,5 +144,7 @@ def find_seams(shape: TopoDS_Shape, min_angle: float = 30.0,
             tangent=t,
             normals=(n1, n2),
             opening_angle=angle,
+            arc_length=arc,
+            midpoint=mid,
         ))
     return seams

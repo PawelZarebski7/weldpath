@@ -70,7 +70,8 @@ def find_weld_seams(bodies: list[TopoDS_Shape], min_length: float = 15.0,
     for seam in find_seams(fused, **seam_kwargs):
         if seam.length < min_length:
             continue  # np. krótkie przejścia na czołach żeber – zwykle "spawanie dookoła"
-        mid = (seam.start + seam.end) / 2
+        # Punkt na spoinie, w którym policzono normalne (dla prostej to środek odcinka).
+        mid = seam.midpoint if seam.midpoint is not None else (seam.start + seam.end) / 2
         n1, n2 = seam.normals
         owners = []
         for n, other in ((n1, n2), (n2, n1)):

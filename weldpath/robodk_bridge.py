@@ -16,14 +16,56 @@ przedramienia, stąd sprzężenie −1. Do tego zero osi 3 w ABB to przedramię
 poziomo, a w OPW pionowo – przesunięcie +90°.
 """
 from itertools import pairwise
+from pathlib import Path
 
 import numpy as np
+from OCP.BRep import BRep_Builder
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
+from OCP.TopoDS import TopoDS_Compound
 from robodk import robolink, robomath
+
+from weldpath.collision import DEFAULT_GEOMETRY, RobotGeometry
 
 # Konwencja osi to czysta kinematyka – mieszka w robot.py, tu ją tylko udostępniamy.
 from weldpath.robot import ABB_IRB2400_CONVENTION, JointConvention
 
 __all__ = ["ABB_IRB2400_CONVENTION", "JointConvention", "RoboDKCell", "RoboDKChecker"]
+
+
+def write_torch_step(path: Path, flange_to_tcp: np.ndarray,
+                     geometry: RobotGeometry = DEFAULT_GEOMETRY) -> Path:
+    """Bryła palnika w układzie KOŁNIERZA – te same wymiary co model kolizji.
+
+    Lanca leży na osi Z narzędzia (od kołnierza do końca drutu):
+      korpus  Ø 2·torch   od kołnierza do początku dyszy,
+      dysza   Ø 2·nozzle  do 'torch_clearance' przed końcem drutu,
+      drut    Ø 1.2 mm    wolny wylot aż do TCP.
+    """
+    tcp = flange_to_tcp[:3, 3]
+    axis = flange_to_tcp[:3, 2]
+    length = float(np.linalg.norm(tcp))
+    g = geometry
+    pieces = [  # (od [mm wzdłuż osi], do, promień)
+        (0.0, length - g.nozzle_length, g.torch),
+        (length - g.nozzle_length, length - g.torch_clearance, g.nozzle),
+        (length - g.torch_clearance, length, 0.6),
+    ]
+    compound = TopoDS_Compound()
+    builder = BRep_Builder()
+    builder.MakeCompound(compound)
+    for start, end, radius in pieces:
+        origin = gp_Pnt(*(axis * start))
+        frame = gp_Ax2(origin, gp_Dir(*axis))
+        builder.Add(compound, BRepPrimAPI_MakeCylinder(frame, radius, end - start).Shape())
+
+    writer = STEPControl_Writer()
+    writer.Transfer(compound, STEPControl_AsIs)
+    if writer.Write(str(path)) != IFSelect_RetDone:
+        raise OSError(f"Nie udało się zapisać {path}")
+    return path
 
 
 def to_mat(T: np.ndarray) -> robomath.Mat:
@@ -63,20 +105,67 @@ class RoboDKCell:
     def joints(self) -> np.ndarray:
         return self.convention.to_opw(self.robot.Joints().list())
 
-    def set_tool(self, flange_to_tcp: np.ndarray, name: str = "Palnik"):
-        """Dodaje do robota narzędzie (sam układ TCP, bez geometrii)."""
+    def find(self, name: str, item_type: int) -> list:
+        """Wszystkie elementy stacji danego typu o DOKŁADNIE tej nazwie."""
+        return [item for item in self.rdk.ItemList(item_type) if item.Name() == name]
+
+    def remove(self, *names: str) -> int:
+        """Usuwa ze stacji obiekty i układy odniesienia o podanych nazwach – wszystkie kopie.
+
+        Usunięcie układu usuwa też wszystko, co jest do niego podpięte.
+        Narzędzi celowo nie usuwamy: usunięcie aktywnego narzędzia robota przez API
+        potrafi zerwać połączenie z RoboDK. Narzędzia używamy ponownie (set_tool).
+        """
+        removed = 0
+        for name in names:
+            for item_type in (robolink.ITEM_TYPE_OBJECT, robolink.ITEM_TYPE_FRAME):
+                for item in self.find(name, item_type):
+                    item.Delete()
+                    removed += 1
+        return removed
+
+    def add_frame(self, name: str, T_base_frame: np.ndarray):
+        """Nowy układ odniesienia względem bazy robota (np. tarcza pozycjonera)."""
+        self.remove(name)
+        frame = self.rdk.AddFrame(name, self.robot.Parent())
+        frame.setPose(to_mat(T_base_frame))
+        return frame
+
+    def set_tool(self, flange_to_tcp: np.ndarray, name: str = "Palnik",
+                 geometry_step: Path | None = None):
+        """Ustawia robotowi narzędzie: układ TCP i (opcjonalnie) bryłę z pliku STEP.
+
+        Jeśli narzędzie o tej nazwie już jest w stacji, używamy go ponownie (aktualizujemy
+        tylko TCP) – dzięki temu skrypt można odpalać wiele razy bez duplikatów.
+        Bryła musi być zapisana w układzie kołnierza (np. przez write_torch_step).
+        """
+        existing = self.find(name, robolink.ITEM_TYPE_TOOL)
+        if existing:
+            tool = existing[0]
+            tool.setPoseTool(to_mat(flange_to_tcp))
+            self.robot.setPoseTool(tool)
+            return tool
         tool = self.robot.AddTool(to_mat(flange_to_tcp), name)
         self.robot.setPoseTool(tool)
+        if geometry_step is not None:
+            shape = self.rdk.AddFile(str(geometry_step))  # wczytujemy tymczasowo...
+            tool.AddGeometry(shape, robomath.eye(4))      # ...kopiujemy do narzędzia...
+            shape.Delete()                                # ...i usuwamy kopię ze stacji
         return tool
 
-    def add_part(self, step_path: str, T_base_part: np.ndarray, name: str = "Detal"):
-        """Wczytuje STEP do stacji i ustawia go względem bazy robota."""
-        base = self.robot.Parent()  # układ "ABB IRB 2400/16 Base"
-        part = self.rdk.AddFile(str(step_path), base)
+    def add_part(self, step_path: str, T_parent_part: np.ndarray, name: str = "Detal",
+                 parent=None):
+        """Wczytuje STEP do stacji i ustawia go względem rodzica (domyślnie bazy robota).
+
+        Poprzedni obiekt o tej samej nazwie jest usuwany – bez duplikatów przy kolejnych uruchomieniach.
+        """
+        self.remove(name)
+        parent = parent if parent is not None else self.robot.Parent()  # "ABB IRB 2400/16 Base"
+        part = self.rdk.AddFile(str(step_path), parent)
         if not part.Valid():
             raise OSError(f"RoboDK nie wczytało {step_path}")
         part.setName(name)
-        part.setPose(to_mat(T_base_part))
+        part.setPose(to_mat(T_parent_part))
         return part
 
     def play(self, path: list[np.ndarray], steps_per_segment: int = 10) -> None:
