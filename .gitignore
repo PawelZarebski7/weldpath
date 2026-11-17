@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+# geometria generowana przez dema RoboDK
+data/bead/
+data/*_fixture.step
+data/faceplate.step
+data/torch.step
