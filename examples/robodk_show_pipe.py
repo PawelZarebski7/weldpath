@@ -105,7 +105,8 @@ print(f"Plan gotowy: {len(plan.passes)} ściegi, robot rusza się o max {plan.ro
 
 # --- RoboDK -------------------------------------------------------------------
 cell = RoboDKCell()
-cell.remove("Rama", "Stół", "Rury", "Tarcza pozycjonera")  # sprzątamy po poprzednich demo
+cell.set_base_pose(np.eye(4))  # robot z powrotem na miejscu (po demo z torem)
+cell.remove("Rama", "Stół", "Rury", "Tarcza pozycjonera", "Hala", "Wózek toru")  # sprzątamy po poprzednich demo
 write_faceplate_step()
 table_frame = cell.add_frame("Pozycjoner", POSITIONER.T_base_part(0, 0))
 pipes = cell.add_part(PIPES, np.eye(4), name="Rury", parent=table_frame)

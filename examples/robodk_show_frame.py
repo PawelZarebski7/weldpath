@@ -1,4 +1,7 @@
-"""Demo w RoboDK: robot ABB IRB 2400 spawa wszystkie spoiny ramy.
+"""Demo w RoboDK: robot ABB IRB 2400 spawa wszystkie spoiny detalu leżącego na stole.
+
+Domyślnie rama (data/frame.step); inny detal: podaj plik STEP jako argument, np.
+    poetry run python examples/robodk_show_frame.py data/bracket.step
 
 Wymaga otwartego RoboDK ze stacją, w której jest robot "ABB IRB 2400/16"
 (np. data/weldcell.rdk). Planowanie liczy nasz kod (FCL), RoboDK tylko pokazuje.
@@ -18,7 +21,7 @@ from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
 
 from weldpath.assembly import find_weld_seams, fuse_bodies, solids
 from weldpath.cad import load_step
-from weldpath.collision import FCLChecker
+from weldpath.collision import FCLChecker, mesh_from_shape
 from weldpath.orientation import homogeneous
 from weldpath.planner import RRTConnect, retract, shortcut
 from weldpath.robodk_bridge import RoboDKCell, write_torch_step
@@ -26,14 +29,21 @@ from weldpath.robot import ABB_IRB2400, ABB_IRB2400_CONVENTION
 from weldpath.weld_job import DEFAULT_TORCH, IRB2400_LIMITS, plan_weld
 
 ROOT = Path(__file__).resolve().parent.parent
-STEP = ROOT / "data" / "frame.step"
-T_BASE_PART = homogeneous(np.eye(3), np.array([800.0, -150.0, 300.0]))  # jak w plan_frame.py
+STEP = Path(sys.argv[1]) if len(sys.argv) > 1 and not sys.argv[1].startswith("-") \
+    else ROOT / "data" / "frame.step"
+# Wymiary detalu z jego siatki: środek w XY i spód – do ustawienia stołu i detalu.
+_verts, _ = mesh_from_shape(load_step(str(STEP)))
+PART_MIN, PART_MAX = _verts.min(axis=0), _verts.max(axis=0)
+PART_CENTER = (PART_MIN + PART_MAX) / 2
+# Środek detalu ląduje tam, gdzie środek ramy w plan_frame.py (dla ramy: bez zmian).
+T_BASE_PART = homogeneous(np.eye(3), np.array([950.0 - PART_CENTER[0], -50.0 - PART_CENTER[1],
+                                               300.0 - PART_MIN[2]]))
 RETRACT_MM = 60.0
 HOME = ABB_IRB2400_CONVENTION.to_opw([0, 0, 0, 0, 30, 0])  # ABB: przedramię poziomo, nadgarstek w dół
 
-# Stół pod ramą (w układzie detalu): blat 900 x 700 x 50 mm, środek pod środkiem ramy.
+# Stół pod detalem (w układzie detalu): blat 900 x 700 x 50 mm, środek pod środkiem detalu.
 TABLE_SIZE = np.array([900.0, 700.0, 50.0])
-TABLE_CENTER = np.array([150.0, 100.0, -25.0])   # rama ma 300 x 200, blat tuż pod nią
+TABLE_CENTER = np.array([PART_CENTER[0], PART_CENTER[1], PART_MIN[2] - 25.0])
 TABLE_STEP = ROOT / "data" / "table.step"
 TORCH_STEP = ROOT / "data" / "torch.step"
 
@@ -112,10 +122,12 @@ log(f"Gotowe: {len(welds)} odcinków spoin, {len(path)} punktów ścieżki, "
 
 # --- 3. RoboDK: detal, palnik, animacja ----------------------------------------
 cell = RoboDKCell()
-cell.remove("Pozycjoner", "Rury", "Tarcza pozycjonera")  # sprzątamy po demo rur
+cell.set_base_pose(np.eye(4))  # robot z powrotem na miejscu (po demo z torem)
+cell.remove("Pozycjoner", "Rury", "Tarcza pozycjonera", "Hala", "Wózek toru",
+            "Rama", "bracket")  # sprzątamy po demo rur
 write_table_step()
 table = cell.add_part(TABLE_STEP, T_BASE_PART, name="Stół")
-frame = cell.add_part(STEP, T_BASE_PART, name="Rama")
+frame = cell.add_part(STEP, T_BASE_PART, name="Rama" if STEP.stem == "frame" else STEP.stem)
 try:  # kolory tylko dla czytelności – gdyby wersja RoboDK ich nie obsługiwała, pomijamy
     table.setColor([0.35, 0.35, 0.40, 1.0])
     frame.setColor([0.75, 0.80, 0.90, 1.0])

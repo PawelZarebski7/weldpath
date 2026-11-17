@@ -124,12 +124,17 @@ class RoboDKCell:
                     removed += 1
         return removed
 
-    def add_frame(self, name: str, T_base_frame: np.ndarray):
-        """Nowy układ odniesienia względem bazy robota (np. tarcza pozycjonera)."""
+    def add_frame(self, name: str, T_parent_frame: np.ndarray, parent=None):
+        """Nowy układ odniesienia względem rodzica (domyślnie bazy robota, 0 = stacja)."""
         self.remove(name)
-        frame = self.rdk.AddFrame(name, self.robot.Parent())
-        frame.setPose(to_mat(T_base_frame))
+        parent = self.robot.Parent() if parent is None else parent
+        frame = self.rdk.AddFrame(name, parent)
+        frame.setPose(to_mat(T_parent_frame))
         return frame
+
+    def set_base_pose(self, T_world_base: np.ndarray) -> None:
+        """Przestawia całego robota (jego układ bazowy) – tak jeździ wózek toru."""
+        self.robot.Parent().setPose(to_mat(T_world_base))
 
     def set_tool(self, flange_to_tcp: np.ndarray, name: str = "Palnik",
                  geometry_step: Path | None = None):
