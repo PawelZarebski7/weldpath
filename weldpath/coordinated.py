@@ -4,6 +4,10 @@ Spoina obwodowa rury: zamiast wozić palnik dookoła rury (palnik raz na górze,
 raz od spodu = pozycja okapowa), pozycjoner OBRACA rurę tak, żeby spawany punkt
 był zawsze na górze (pozycja podolna PA). Robot prawie stoi w miejscu.
 
+To samo działa dla spoin złożonych z wielu krawędzi (chain_seams): profil
+zamknięty dookoła (4 proste + 4 łuki naroży) albo siodło rury na rurze –
+krawędzie łączymy w jeden łańcuch i spawamy jednym ciągłym ruchem.
+
 Dla każdego punktu spoiny (co `step` mm):
   1. liczymy lokalny kierunek spoiny i normalne obu ścian rowka (zmieniają się
      wzdłuż okręgu – na prostej były stałe),
@@ -15,6 +19,7 @@ Grubą ściankę spawa się WIELOŚCIEGOWO: grań (dno rowka), wypełnienie, lic
 każdy ścieg to ta sama droga przesunięta wzdłuż dwusiecznej rowka na zewnątrz.
 """
 from dataclasses import dataclass, field, replace
+from itertools import pairwise
 
 import numpy as np
 from OCP.BRepAdaptor import BRepAdaptor_Curve
@@ -118,12 +123,23 @@ def positioner_track(positioner: Positioner, samples: list[SeamSample]) -> np.nd
 
 
 def plan_coordinated(robot: OPWParams, seam: Seam, positioner: Positioner, checker,
-                     torch: Torch = DEFAULT_TORCH, limits=IRB2400_LIMITS,
-                     step: float = 10.0, overlap: float = 15.0, travel_angle: float = 10.0,
-                     passes=DEFAULT_PASSES, spins=(0, 30, -30, 60, -60, 90, -90),
-                     max_step: float = 15.0) -> CoordinatedPlan | None:
+                     step: float = 10.0, overlap: float = 15.0, **kwargs) -> CoordinatedPlan | None:
     """Plan spawania z obracającym się pozycjonerem: robot + 2 osie pozycjonera naraz."""
-    samples = sample_seam(seam, step, overlap)
+    return plan_coordinated_samples(robot, sample_seam(seam, step, overlap), seam,
+                                    positioner, checker, **kwargs)
+
+
+def plan_coordinated_samples(robot: OPWParams, samples: list[SeamSample], template: Seam,
+                             positioner: Positioner, checker,
+                             torch: Torch = DEFAULT_TORCH, limits=IRB2400_LIMITS,
+                             travel_angle: float = 10.0, passes=DEFAULT_PASSES,
+                             spins=(0, 30, -30, 60, -60, 90, -90),
+                             max_step: float = 15.0) -> CoordinatedPlan | None:
+    """Ruch skoordynowany dla dowolnej listy punktów spoiny (jedna krawędź albo łańcuch).
+
+    template: spoina, z której bierzemy pozostałe pola (krawędź, ściany) – w każdym
+    punkcie i tak podmieniamy kierunek i normalne na lokalne.
+    """
     track = positioner_track(positioner, samples)
     part_poses = [positioner.T_base_part(tilt, rot) for tilt, rot in track]
     T_tcp_flange = np.linalg.inv(torch.flange_to_tcp())
@@ -134,7 +150,7 @@ def plan_coordinated(robot: OPWParams, seam: Seam, positioner: Positioner, check
         for _, offset in passes:
             targets = []
             for smp, T_part in zip(samples, part_poses):
-                local = replace(seam, tangent=smp.tangent, normals=smp.normals)
+                local = replace(template, tangent=smp.tangent, normals=smp.normals)
                 T_tcp = torch_frame(local, smp.point + offset * smp.opening, None, travel_angle)
                 targets.append(T_part @ T_tcp @ R_spin @ T_tcp_flange)
             per_pass_solutions.append(np.array([inverse_kinematics(robot, T) for T in targets]))
@@ -158,11 +174,96 @@ def plan_coordinated(robot: OPWParams, seam: Seam, positioner: Positioner, check
             if collides:
                 continue
             return CoordinatedPlan(
-                seam=seam, config=config, spin=float(spin),
+                seam=template, config=config, spin=float(spin),
                 passes=[WeldPass(name, off, q, track.copy())
                         for (name, off), q in zip(passes, qs)],
             )
     return None
+
+
+# --- spoiny z kilku krawędzi (łańcuchy) -------------------------------------
+
+def chain_seams(seams: list[Seam], tol: float = 1e-3) -> list[list[tuple[Seam, bool]]]:
+    """Łączy krawędzie stykające się końcami w łańcuchy: [(spoina, odwrócona?), ...].
+
+    Spoina dookoła profilu to np. 4 proste + 4 łuki; po połączeniu spawamy ją jednym ruchem.
+    """
+    left = list(seams)
+    chains = []
+    while left:
+        chain = [(left.pop(0), False)]
+        grown = True
+        while grown:
+            grown = False
+            tail_seam, tail_rev = chain[-1]
+            tail = tail_seam.start if tail_rev else tail_seam.end
+            for i, s in enumerate(left):
+                if np.linalg.norm(s.start - tail) < tol:
+                    chain.append((left.pop(i), False))
+                    grown = True
+                    break
+                if np.linalg.norm(s.end - tail) < tol:
+                    chain.append((left.pop(i), True))
+                    grown = True
+                    break
+        chains.append(chain)
+    return chains
+
+
+def chain_length(chain) -> float:
+    return float(sum(seam.length for seam, _ in chain))
+
+
+def is_closed(chain, tol: float = 1e-3) -> bool:
+    first, first_rev = chain[0]
+    last, last_rev = chain[-1]
+    head = first.end if first_rev else first.start
+    tail = last.start if last_rev else last.end
+    return bool(np.linalg.norm(head - tail) < tol)
+
+
+def _sample_edge(seam: Seam, reverse: bool, spacing: float) -> list[SeamSample]:
+    curve = BRepAdaptor_Curve(seam.edge)
+    u0, u1 = curve.FirstParameter(), curve.LastParameter()
+    n = max(1, int(np.ceil(seam.length / spacing)))
+    f1, f2 = seam.faces
+    out = []
+    for k in range(n + 1):
+        frac = k / n
+        u = u1 + (u0 - u1) * frac if reverse else u0 + (u1 - u0) * frac
+        p, v = gp_Pnt(), gp_Vec()
+        curve.D1(u, p, v)
+        point = np.array([p.X(), p.Y(), p.Z()])
+        t = np.array([v.X(), v.Y(), v.Z()]) * (-1.0 if reverse else 1.0)
+        out.append(SeamSample(point, t / np.linalg.norm(t),
+                              (face_normal(f1, point), face_normal(f2, point))))
+    return out
+
+
+def sample_chain(chain, step: float = 10.0, overlap: float = 0.0) -> list[SeamSample]:
+    """Punkty co ok. `step` mm wzdłuż całego łańcucha (z zakładką, jeśli jest zamknięty)."""
+    samples: list[SeamSample] = []
+    for seam, reverse in chain:
+        edge_samples = _sample_edge(seam, reverse, step)
+        samples.extend(edge_samples if not samples else edge_samples[1:])  # bez podwójnych złączy
+    if overlap > 0 and is_closed(chain):
+        travelled, extra = 0.0, []
+        for a, b in pairwise(samples):
+            if travelled >= overlap:
+                break
+            travelled += float(np.linalg.norm(b.point - a.point))
+            extra.append(b)
+        samples.extend(extra)
+    return samples
+
+
+def outer_chain(chains, T_table_part: np.ndarray):
+    """Łańcuch najdalej od osi obrotu tarczy – spoina zewnętrzna (wewnętrzna leży w środku profilu lub rury)."""
+    def mean_radius(chain):
+        pts = np.array([s.point for s in sample_chain(chain, 20.0)])
+        local = (T_table_part[:3, :3] @ pts.T).T + T_table_part[:3, 3]
+        return float(np.mean(np.hypot(local[:, 0], local[:, 1])))
+    return max(chains, key=mean_radius)
 
 
 # --- pełny program stanowiska: kolejność ruchów robota i pozycjonera ----------
@@ -194,11 +295,11 @@ def build_cell_program(robot: OPWParams, plan: CoordinatedPlan, positioner: Posi
                        limits=IRB2400_LIMITS, retract_mm: float = 60.0) -> list[Segment]:
     """Kolejność jak na prawdziwym stanowisku – robot i pozycjoner nie wchodzą sobie w drogę.
 
-    1. robot w domu, pozycjoner kładzie rurę,
-    2. robot podjeżdża (RRT) nad rowek, odsunięty o retract_mm wzdłuż osi palnika,
+    1. robot w domu, pozycjoner ustawia detal do spawania,
+    2. robot podjeżdża (RRT) nad spoinę, odsunięty o retract_mm wzdłuż osi palnika,
     3. dojazd liniowy, ściegi (ruch skoordynowany), przejścia między ściegami,
     4. odjazd liniowy, powrót robota do domu (RRT),
-    5. pozycjoner podnosi rurę.
+    5. pozycjoner wraca do poziomu (rozładunek).
     Każdy odcinek jest sprawdzony na kolizje; gdy któregoś nie da się wykonać – wyjątek.
     """
     from weldpath.planner import RRTConnect, motion_valid, retract, shortcut
@@ -208,7 +309,7 @@ def build_cell_program(robot: OPWParams, plan: CoordinatedPlan, positioner: Posi
     tracks = []
     for k, weld_pass in enumerate(passes):
         track = weld_pass.positioner.copy()
-        track[:, 1] -= 360.0 * k          # każdy ścieg zaczyna się w tym samym miejscu rury
+        track[:, 1] -= 360.0 * k          # każdy ścieg zaczyna się w tym samym miejscu detalu
         tracks.append(track)
     start, end = tracks[0][0], tracks[-1][-1]
     q_first, q_last = passes[0].joints[0], passes[-1].joints[-1]
@@ -233,15 +334,15 @@ def build_cell_program(robot: OPWParams, plan: CoordinatedPlan, positioner: Posi
             raise RuntimeError(f"Kolizja: {label}")
         segments.append(Segment(label, "linear", [qa, qb], [pose, pose]))
 
-    # 1. pozycjoner kładzie rurę, robot czeka w domu
-    positioner_move("pozycjoner: kładzenie rury", home, flat, start)
+    # 1. pozycjoner ustawia detal, robot czeka w domu
+    positioner_move("pozycjoner: ustawienie detalu do spawania", home, flat, start)
 
-    # 2-3. podjazd nad rowek i dojazd liniowy
+    # 2-3. podjazd nad spoinę i dojazd liniowy
     checker.set_part_pose(positioner.T_base_part(*start))
     q_approach = retract(robot, q_first, plan.config, torch, retract_mm)
     if q_approach is None or checker.in_collision(q_approach):
-        raise RuntimeError("Punkt podjazdu nad rowkiem niedostępny")
-    transit("robot: podjazd nad rowek", home, q_approach, start)
+        raise RuntimeError("Punkt podjazdu nad spoiną niedostępny")
+    transit("robot: podjazd nad spoinę", home, q_approach, start)
     linear("robot: dojazd do startu spoiny", q_approach, q_first, start)
 
     # ściegi i przejścia między nimi
@@ -260,10 +361,10 @@ def build_cell_program(robot: OPWParams, plan: CoordinatedPlan, positioner: Posi
     checker.set_part_pose(positioner.T_base_part(*end))
     q_depart = retract(robot, q_last, plan.config, torch, retract_mm)
     if q_depart is None or checker.in_collision(q_depart):
-        raise RuntimeError("Punkt odjazdu nad rowkiem niedostępny")
+        raise RuntimeError("Punkt odjazdu nad spoiną niedostępny")
     linear("robot: odjazd od spoiny", q_last, q_depart, end)
     transit("robot: powrót do domu", q_depart, home, end)
 
-    # 5. pozycjoner podnosi rurę
-    positioner_move("pozycjoner: podnoszenie rury", home, end, np.array([0.0, end[1]]))
+    # 5. pozycjoner wraca do poziomu
+    positioner_move("pozycjoner: powrót do poziomu", home, end, np.array([0.0, end[1]]))
     return segments
